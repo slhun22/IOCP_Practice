@@ -12,7 +12,6 @@ public :
 	EchoServer() = default;
 	virtual ~EchoServer() = default;
 
-
 	void OnConnect(const UINT32 clientIdx_) override {
 		printf("[OnConnect] 클라이언트: Index(%d)\n", clientIdx_);
 	}
@@ -53,7 +52,7 @@ private:
 		while (mIsRunProcessThread) {
 			auto packetData = DequePacketData();
 			if (packetData.DataSize != 0)
-				SendMsg(packetData.SessionIndex, packetData.DataSize, packetData.pPacketData);
+				SendMsg(packetData.SessionIndex, packetData.DataSize, packetData.pPacketData); //받은 패킷을 처리하는 코드가 들어가는 자리.
 			else
 				std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		}

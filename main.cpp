@@ -17,7 +17,7 @@ int main()
 
 	server.Run(MAX_CLIENT);
 
-	printf("아무 키나 누를 때까지 대기합니다\n");
+	printf("quit 누를 때까지 대기합니다\n");
 	while (true)
 	{
 		std::string inputCmd;
