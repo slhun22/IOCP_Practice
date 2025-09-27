@@ -15,7 +15,7 @@ enum class IOOperation {
 //WSAOVERLAPPED구조체를 확장 시켜서 필요한 정보를 더 넣은 것
 struct stOverlappedEx {
 	WSAOVERLAPPED m_wsaOverlapped;	//Overlapped I/O구조체
-	SOCKET m_socketClient;	//클라이언트 소켓
+	//SOCKET m_socketClient;	//클라이언트 소켓
 	WSABUF m_wsaBuf;	//Overlapped I/O작업 버퍼
 	IOOperation m_eOperation;	//작업 동작 종류
 };

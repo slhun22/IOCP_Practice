@@ -88,8 +88,6 @@ public:
 			return false;
 		}
 
-		CreateSenderThread();
-
 		printf("서버 시작\n");
 		return true;
 	}
@@ -150,12 +148,6 @@ private:
 
 		printf("AccepterThread 시작..\n");
 		return true;
-	}
-
-	void CreateSenderThread() {
-		mIsSenderRun = true;
-		mSenderThread = std::thread([this]() { SenderThread(); });
-		printf("SenderThread 시작..\n");
 	}
 
 	//사용하지 않는 클라이언트 정보 구조체를 반환한다.
@@ -278,19 +270,6 @@ private:
 		OnClose(clientIndex);
 	}
 
-	void SenderThread() {
-		while (mIsSenderRun) {
-			for (auto& client : mClientInfos) {
-				if (!client->IsConnected())
-					continue;
-
-				client->SendIO();
-			}
-
-			std::this_thread::sleep_for(std::chrono::milliseconds(8));
-		}
-	}
-
 	//클라이언트 정보 저장 구조체
 	std::vector<ClientInfo*> mClientInfos;
 
@@ -307,9 +286,6 @@ private:
 	//Accept 스레드
 	std::thread	mAccepterThread;
 
-	//Send 스레드
-	std::thread mSenderThread;
-
 
 	//CompletionPort객체 핸들
 	HANDLE mIOCPHandle = INVALID_HANDLE_VALUE;
@@ -320,7 +296,4 @@ private:
 
 	//접속 쓰레드 동작 플래그
 	bool mIsAccepterRun = true;
-
-	//전송 쓰레드 동작 플래그
-	bool mIsSenderRun = false;
 };

@@ -65,7 +65,7 @@ private:
 		if (mPacketDataQueue.empty())
 			return PacketData();
 
-		packetData = mPacketDataQueue.front();
+		//packetData = mPacketDataQueue.front();
 		packetData.Set(mPacketDataQueue.front());
 
 		mPacketDataQueue.front().Release();
