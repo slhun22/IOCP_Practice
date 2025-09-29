@@ -1,5 +1,6 @@
 #pragma once
 #pragma comment(lib, "ws2_32")
+#pragma comment(lib, "mswsock.lib")
 
 #include "ClientInfo.h"
 #include "Define.h"
@@ -15,7 +16,7 @@ public:
 		WSACleanup();
 	}
 
-	bool InitSocket() {
+	bool Init(const UINT32 maxIOWorkerThreadCount_) {
 		WSADATA wsaData;
 
 		int nRet = WSAStartup(MAKEWORD(2, 2), &wsaData);
@@ -31,6 +32,8 @@ public:
 			printf("[에러] socket()함수 실패 : %d\n", WSAGetLastError());
 			return false;
 		}
+
+		MaxIOWorkerThreadCount = maxIOWorkerThreadCount_;
 
 		printf("소켓 초기화 성공\n");
 		return true;
@@ -64,6 +67,20 @@ public:
 			return false;
 		}
 
+		//CompletionPort객체 생성 요청을 한다.
+		mIOCPHandle = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, NULL, MaxIOWorkerThreadCount);
+		if (mIOCPHandle == NULL) {
+			printf("[에러] CreateIoCompletionPort()함수 실패: %d\n", GetLastError());
+			return false;
+		}
+
+		//accept 요청이 들어오면 IOCP큐로 보내기 위해 listen소켓을 IOCP객체에 연결
+		auto hIOCPHandle = CreateIoCompletionPort((HANDLE)mListenSocket, mIOCPHandle, (UINT32)0, 0);
+		if (hIOCPHandle == nullptr) {
+			printf("[에러] listen socket IOCP bind 실패 : %d\n", WSAGetLastError());
+			return false;
+		}
+
 		printf("서버 등록 성공..\n");
 		return true;
 	}
@@ -71,12 +88,6 @@ public:
 	//접속 요청을 수락하고 메시지를 받아서 처리하는 함수
 	bool StartServer(const UINT32 maxClientCount) {
 		CreateClient(maxClientCount);
-
-		mIOCPHandle = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, NULL, MAX_WORKERTHREAD);
-		if (mIOCPHandle == NULL) {
-			printf("[에러] CreateIoCompletionPort()함수 실패: %d\n", GetLastError());
-			return false;
-		}
 
 		bool bRet = CreateWorkerThread();
 		if (bRet == false) {
@@ -123,7 +134,7 @@ private:
 	void CreateClient(const UINT32 maxClientCount) {
 		for (UINT32 i = 0; i < maxClientCount; i++) {
 			auto client = new ClientInfo();
-			client->Init(i);
+			client->Init(i, mIOCPHandle);
 			mClientInfos.push_back(client);
 		}
 	}
@@ -133,7 +144,7 @@ private:
 		mIsWorkerRun = true;
 
 		//waitingThread Queue에 대기 상태로 넣을 쓰레드들 생성 권장되는 개수 : (cpu개수 * 2) + 1
-		for (int i = 0; i < MAX_WORKERTHREAD; i++) {
+		for (int i = 0; i < MaxIOWorkerThreadCount; i++) {
 			mIOWorkerThreads.emplace_back([this]() { WorkerThread(); });
 		}
 
@@ -153,7 +164,7 @@ private:
 	//사용하지 않는 클라이언트 정보 구조체를 반환한다.
 	ClientInfo* GetEmptyClientInfo() {
 		for (auto& client : mClientInfos) {
-			if (client->IsConnected() == false)
+			if (!client->IsConnected())
 				return client;
 		}
 
@@ -201,28 +212,34 @@ private:
 				continue;
 			}
 
+			auto pOverlappedEx = (stOverlappedEx*)lpOverlapped;
+
 			//client가 접속을 끊었을 때..
-			if (bSuccess == FALSE || (dwIoSize == 0 && bSuccess == TRUE)) {
+			if (bSuccess == FALSE || (dwIoSize == 0 && pOverlappedEx->m_eOperation != IOOperation::ACCEPT)) {
 				//printf("socket(%d) 접속 끊김\n", (int)pClientInfo->GetSock());
 				CloseSocket(pClientInfo);
 				continue;
 			}
 
 
-			auto pOverlappedEx = (stOverlappedEx*)lpOverlapped;
+			if (pOverlappedEx->m_eOperation == IOOperation::ACCEPT) {
+				pClientInfo = GetClientInfo(pOverlappedEx->SessionIndex);
+				if (pClientInfo->AcceptCompletion()) {
+					//클라이언트 개수 증가
+					++mClientCnt;
 
-			//Overlapped I/O Recv작업 결과 뒤 처리
-			if (pOverlappedEx->m_eOperation == IOOperation::RECV) {
-				//이 주석 부분은 로직 부분이 아니므로 따로 분리하였다.
-				OnReceive(pClientInfo->GetIndex(), dwIoSize, pClientInfo->RecvBuffer());
-				
+					OnConnect(pClientInfo->GetIndex());
+				}
+				else
+					CloseSocket(pClientInfo, true);
+			}
+			else if (pOverlappedEx->m_eOperation == IOOperation::RECV) {
+				OnReceive(pClientInfo->GetIndex(), dwIoSize, pClientInfo->RecvBuffer());			
 				pClientInfo->BindRecv();
 			}
-			//Overlapped I/O Send작업 결과 뒤 처리
 			else if (pOverlappedEx->m_eOperation == IOOperation::SEND) {
 				pClientInfo->Sendcompleted(dwIoSize);
 			}
-			//예외 상황
 			else {
 				printf("Client Index(%d)에서 예외상황\n", (int)pClientInfo->GetIndex());
 			}
@@ -231,35 +248,24 @@ private:
 
 	//사용자의 접속을 받는 쓰레드
 	void AccepterThread() {
-		SOCKADDR_IN clientAddr;
-		int nAddrLen = sizeof(SOCKADDR_IN);
-
 		while (mIsAccepterRun) {
-			//접속을 받을 구조체의 인덱스를 얻어온다.
-			ClientInfo* pClientInfo = GetEmptyClientInfo();
-			if (pClientInfo == NULL) {
-				printf("[에러] Client Full\n");
-				return;
+			//현재 시간
+			auto curTimeSec = chrono::duration_cast<chrono::seconds>(chrono::steady_clock::now().time_since_epoch()).count();
+
+			for (auto client : mClientInfos) {
+				if (client->IsConnected()) //이미 연결되어 있는 클라이언트는 패스
+					continue;
+				if ((UINT64)curTimeSec < client->GetLatestClosedTimeSec()) //PostAccept을 이미 하고 연결 대기 중인 클라이언트는 패스
+					continue;
+
+				auto diff = curTimeSec - client->GetLatestClosedTimeSec();
+				if (diff <= RE_USE_SESSION_WAIT_TIMESEC) //닫힌지 얼마 안된 client면 사용X
+					continue;
+
+				client->PostAccept(mListenSocket, curTimeSec); //Time을 무한대로 변경함. 두번째 if문에서 걸리도록
 			}
 
-			//클라이언트 접속 요청이 들어올 때까지 기다린다.
-			auto newSocket = accept(mListenSocket, (SOCKADDR*)&clientAddr, &nAddrLen);
-			if (newSocket == INVALID_SOCKET)
-				continue;
-
-			if (pClientInfo->OnConnect(mIOCPHandle, newSocket) == false) {
-				pClientInfo->Close(true);
-				return;
-			}
-
-			//char clientIP[32] = { 0, };
-			//inet_ntop(AF_INET, &(stClientAddr.sin_addr), clientIP, 32 - 1);
-			//printf("클라이언트 접속 : IP(%s) SOCKET(%d)\n", clientIP, (int)pClientInfo->m_socketClient);
-			
-			OnConnect(pClientInfo->GetIndex());
-
-			//클라이언트 갯수 증가
-			++mClientCnt;
+			this_thread::sleep_for(chrono::milliseconds(32));
 		}
 	}
 
@@ -269,6 +275,8 @@ private:
 		pClientInfo->Close(bIsForce);
 		OnClose(clientIndex);
 	}
+
+	UINT32 MaxIOWorkerThreadCount = 0;
 
 	//클라이언트 정보 저장 구조체
 	std::vector<ClientInfo*> mClientInfos;

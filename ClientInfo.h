@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Define.h"
+#include <MSWSock.h>
 #include <stdio.h>
 #include <mutex>
 #include <queue>
@@ -17,25 +18,31 @@ public:
 
 	~ClientInfo() = default;
 
-	void Init(const UINT32 index) {
+	void Init(const UINT32 index, HANDLE iocpHandle_) {
 		mIndex = index;
+		mIOCPHandle = iocpHandle_;
 	}
 
 	UINT32 GetIndex() { return mIndex; }
 
-	bool IsConnected() { return mSock != INVALID_SOCKET; }
+	bool IsConnected() { return mIsConnect; }
 
 	SOCKET GetSock() { return mSock; }
 
+	UINT64 GetLatestClosedTimeSec() { return mLatestClosedTimeSec; }
+
 	char* RecvBuffer() { return mRecvBuf; }
 
-	bool OnConnect(HANDLE iocpHandle_, SOCKET socket_) {
-		mSock = socket_;
+
+
+	bool OnConnect() {
+		//mSock = socket_;
+		mIsConnect = true;
 
 		Clear();
 
 		//I/O Completion Port객체와 소켓을 연결시킨다.
-		if (BindIOCompletionPort(iocpHandle_) == false)
+		if (BindIOCompletionPort(mIOCPHandle) == false)
 			return false;
 
 		return BindRecv();
@@ -51,11 +58,68 @@ public:
 
 		setsockopt(mSock, SOL_SOCKET, SO_LINGER, (char*)&stLinger, sizeof(stLinger));
 
+		mIsConnect = false;
+		mLatestClosedTimeSec = chrono::duration_cast<chrono::seconds>(chrono::steady_clock::now().time_since_epoch()).count();
+		
 		closesocket(mSock);
 		mSock = INVALID_SOCKET;
 	}
 
 	void Clear() {
+	}
+
+	bool PostAccept(SOCKET listenSock_, const UINT64 curTimeSec_) { //Accept 예약
+		printf_s("PostAccept. client Index: %d\n", GetIndex());
+
+		mLatestClosedTimeSec = UINT32_MAX;
+
+		mSock = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_IP, NULL, 0, WSA_FLAG_OVERLAPPED); //accept()은 리턴값으로 통신할 소켓을 줬지만, 비동기 방식은 아니므로 각 ClientInfo에서 통신할 소켓을 미리 만들어둔다.
+
+		if (mSock == INVALID_SOCKET) {
+			printf_s("client Socket WSASocket Error : %d\n", GetLastError());
+			return false;
+		}
+
+		//mAcceptContext는 멤버 변수이므로 그냥 ZeroMemory랑 Overlapped구조체 값 초기화는 초기에 한 번만 해도 될 것 같은데, 일단 냅둠.
+		ZeroMemory(&mAcceptContext, sizeof(stOverlappedEx));
+
+		DWORD bytes = 0;
+		DWORD flags = 0;
+		mAcceptContext.m_wsaBuf.len = 0;
+		mAcceptContext.m_wsaBuf.buf = nullptr;
+		mAcceptContext.m_eOperation = IOOperation::ACCEPT;
+		mAcceptContext.SessionIndex = mIndex;
+
+		//BindRecv처럼 나중에 listenSocket이 accept요청을 받으면 그 요청이 Overlapped구조체 형태로 IOCP큐로 갈거임
+		int nRet = AcceptEx(listenSock_, mSock,
+			mAcceptBuf,
+			0,
+			sizeof(SOCKADDR_IN) + 16,
+			sizeof(SOCKADDR_IN) + 16,
+			&bytes,
+			(LPWSAOVERLAPPED)&(mAcceptContext));
+
+		if (nRet == FALSE && WSAGetLastError() != WSA_IO_PENDING) {
+			printf_s("AcceptEx Error : %d\n", GetLastError());
+			return false;
+		}
+
+		return true;
+	}
+
+	bool AcceptCompletion() {
+		printf_s("AcceptCompletion : SessionIndex(%d)\n", mIndex);
+
+		if (!OnConnect())
+			return false;
+
+		SOCKADDR_IN stClientAddr; //이거 아직 안채워서 IP 제대로 안 들어감. GetAcceptExSockaddrs()로 주소 받아야함
+		int nAddrLen = sizeof(SOCKADDR_IN);
+		char clientIP[32] = { 0, };
+		inet_ntop(AF_INET, &(stClientAddr.sin_addr), clientIP, 32 - 1);
+		printf("클라이언트 접속 : IP(%s) SOCKET(%d)\n", clientIP, (int)mSock);
+
+		return true;
 	}
 
 	bool BindIOCompletionPort(HANDLE iocpHandle_) {
@@ -153,10 +217,40 @@ private:
 		return true;
 	}
 
-	INT32 mIndex = 0;
-	SOCKET mSock; //Client와 연결되는 소켓
-	stOverlappedEx mRecvOverlappedEx; //RECV Overlapped I/O 작업을 위한 변수
+	bool SetSocketOption() { //아직 안씀
+		/*if (SOCKET_ERROR == setsockopt(mSock, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)GIocpManager->GetListenSocket(), sizeof(SOCKET)))
+		{
+			printf_s("[DEBUG] SO_UPDATE_ACCEPT_CONTEXT error: %d\n", GetLastError());
+			return false;
+		}*/
 
+		int opt = 1;
+		if (setsockopt(mSock, IPPROTO_TCP, TCP_NODELAY, (const char*)&opt, sizeof(int)) == SOCKET_ERROR) {
+			printf_s("[DEBUG] TCP_NODELAY error: %d\n", GetLastError());
+			return false;
+		}
+
+		opt = 0;
+		if (setsockopt(mSock, SOL_SOCKET, SO_RCVBUF, (const char*)&opt, sizeof(int)) == SOCKET_ERROR) {
+			printf_s("[DEBUG] SO_RCVBUF change error: %d\n", GetLastError());
+			return false;
+		}
+
+		return true;
+	}
+
+	INT32 mIndex = 0;
+	HANDLE mIOCPHandle = INVALID_HANDLE_VALUE;
+
+	bool mIsConnect = 0;
+	UINT64 mLatestClosedTimeSec = 0;
+
+	SOCKET mSock; //Client와 연결되는 소켓
+
+	stOverlappedEx mAcceptContext;
+	char mAcceptBuf[64];
+
+	stOverlappedEx mRecvOverlappedEx; //RECV Overlapped I/O 작업을 위한 변수
 	char mRecvBuf[MAX_SOCKBUF]; //데이터 버퍼? 이건 덮어씌워지기 고려 안한건가 아직
 
 	mutex mSendLock;
