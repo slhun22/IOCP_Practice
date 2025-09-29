@@ -42,7 +42,7 @@ public:
 		Clear();
 
 		//I/O Completion Port객체와 소켓을 연결시킨다.
-		if (BindIOCompletionPort(mIOCPHandle) == false)
+		if (!BindIOCompletionPort())
 			return false;
 
 		return BindRecv();
@@ -90,7 +90,8 @@ public:
 		mAcceptContext.m_eOperation = IOOperation::ACCEPT;
 		mAcceptContext.SessionIndex = mIndex;
 
-		//BindRecv처럼 나중에 listenSocket이 accept요청을 받으면 그 요청이 Overlapped구조체 형태로 IOCP큐로 갈거임
+		//나중에 listenSocket이 accept요청을 받아서 mSock과 클라이언트를 "!연결 완료하면!", Overlapped구조체 형태로 IOCP큐로 갈거임
+		//WSASend처럼 완료하고 난 이후에 알려주는 의미로 Overlapped구조체를 쓴다.
 		int nRet = AcceptEx(listenSock_, mSock,
 			mAcceptBuf,
 			0,
@@ -122,10 +123,10 @@ public:
 		return true;
 	}
 
-	bool BindIOCompletionPort(HANDLE iocpHandle_) {
+	bool BindIOCompletionPort() {
 		//socket과 pClientInfo를 CompletionPort 객체와 연결시킨다.
-		auto hIOCP = CreateIoCompletionPort((HANDLE)GetSock()
-			, iocpHandle_
+		auto hIOCP = CreateIoCompletionPort((HANDLE)mSock
+			, mIOCPHandle
 			, (ULONG_PTR)(this), 0);
 
 		if (hIOCP == INVALID_HANDLE_VALUE) {
